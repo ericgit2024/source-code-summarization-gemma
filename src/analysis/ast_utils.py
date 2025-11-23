@@ -19,11 +19,26 @@ class ASTAnalyzer:
     # load language first
         self.language = self._load_language(language_name)
 
-    # NEW API: Parser(language=...)
-        self.parser = Parser(language=self.language)
+    # NEW API: Parser(language=...) or Parser(language)
+        if self.language:
+            try:
+                self.parser = Parser(self.language)
+            except TypeError:
+                # Fallback for older versions or different signatures
+                self.parser = Parser()
+                self.parser.set_language(self.language)
+        else:
+            self.parser = None
 
 
     def _load_language(self, language_name):
+        # Try tree_sitter_languages first (easiest path)
+        try:
+            from tree_sitter_languages import get_language
+            return get_language(language_name)
+        except ImportError:
+            pass
+
         # This is a simplified loader. In production, this needs to handle paths to .so files
         # or use `tree_sitter_languages` package which comes with pre-built binaries.
         try:
@@ -44,9 +59,12 @@ class ASTAnalyzer:
              # This might fail if not properly set up.
              print(f"Warning: Could not load tree-sitter bindings for {language_name}. Ensure packages are installed.")
              return None
+        except TypeError as e:
+             print(f"Error loading language {language_name}: {e}. Check tree-sitter version compatibility.")
+             return None
 
     def parse(self, code):
-        if not self.language:
+        if not self.language or not self.parser:
             return None
         tree = self.parser.parse(bytes(code, "utf8"))
         return tree
@@ -82,11 +100,24 @@ class ASTAnalyzer:
 
         query = self.language.query(query_scm)
         
-        # In tree-sitter 0.22+, use QueryCursor().matches(query, node)
-        cursor = tree_sitter.QueryCursor()
-        matches = cursor.matches(query, root_node)
+        # Handle different tree-sitter versions for QueryCursor
+        try:
+            # New API: QueryCursor(query)
+            cursor = tree_sitter.QueryCursor(query)
+            matches = cursor.matches(root_node)
+        except TypeError:
+            # Old API: QueryCursor()
+            cursor = tree_sitter.QueryCursor()
+            matches = cursor.matches(query, root_node)
         
-        for _, captures in matches:
+        for match in matches:
+            # match can be (id, captures) or just match object depending on version
+            # We assume standard (id, captures) tuple or object with captures
+            if isinstance(match, tuple):
+                captures = match[1]
+            else:
+                captures = match.captures # if object
+            
             if 'function' in captures:
                 return captures['function'][0]
             if 'method' in captures:
@@ -102,14 +133,38 @@ class ASTAnalyzer:
             call_query = self.language.query("(call function: (identifier) @func_name)")
             var_query = self.language.query("(identifier) @var_name")
             
-            cursor = tree_sitter.QueryCursor()
+            # Calls
+            try:
+                cursor = tree_sitter.QueryCursor(call_query)
+                call_matches = cursor.matches(node)
+            except TypeError:
+                cursor = tree_sitter.QueryCursor()
+                call_matches = cursor.matches(call_query, node)
             
-            for _, captures in cursor.matches(call_query, node):
+            for match in call_matches:
+                if isinstance(match, tuple):
+                    captures = match[1]
+                else:
+                    captures = match.captures
+
                 if 'func_name' in captures:
                     for n in captures['func_name']:
                         calls.append(n.text.decode('utf8'))
             
-            for _, captures in cursor.matches(var_query, node):
+            # Variables
+            try:
+                cursor = tree_sitter.QueryCursor(var_query)
+                var_matches = cursor.matches(node)
+            except TypeError:
+                cursor = tree_sitter.QueryCursor()
+                var_matches = cursor.matches(var_query, node)
+
+            for match in var_matches:
+                if isinstance(match, tuple):
+                    captures = match[1]
+                else:
+                    captures = match.captures
+
                 if 'var_name' in captures:
                     for n in captures['var_name']:
                         variables.append(n.text.decode('utf8'))
